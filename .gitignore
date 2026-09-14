@@ -1,0 +1,7 @@
+dip_env/
+data/raw/
+data/processed/
+data/noisy/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
