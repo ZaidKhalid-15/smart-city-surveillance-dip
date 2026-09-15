@@ -1,0 +1,3 @@
+method,iou,dice
+canny_filled,0.384,0.518
+watershed,0.003,0.006

@@ -1,0 +1,6 @@
+method,compression_ratio,psnr,ssim
+jpeg_q30,4.608,32.413,0.892
+jpeg_q70,2.574,36.31,0.943
+jpeg_q90,1.328,40.682,0.975
+wavelet_t70,3.321,42.814,0.976
+wavelet_t90,9.991,33.361,0.883

@@ -1,0 +1,5 @@
+pipeline_stage,fps
+median_filter,37.45680812537709
+canny_edge,1213.7771372678392
+jpeg_compress,2972.069952665741
+yolo_inference,222.3061772681113

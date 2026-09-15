@@ -1,0 +1,10 @@
+noise_type,filter,psnr,ssim
+blur,mean,26.487,0.752
+blur,median,26.615,0.756
+blur,none,26.684,0.762
+gaussian,mean,28.228,0.715
+gaussian,median,27.842,0.672
+gaussian,none,23.497,0.448
+saltpepper,mean,25.242,0.58
+saltpepper,median,33.496,0.907
+saltpepper,none,17.683,0.339

@@ -1,0 +1,4 @@
+class,bpp,psnr
+incorrect_mask,1.366,33.234
+with_mask,1.263,34.722
+without_mask,0.869,40.976
