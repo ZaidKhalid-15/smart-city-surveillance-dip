@@ -66,7 +66,7 @@ Full quantitative results, per-class breakdowns, and discussion are in [`report/
 ## Deliverables
 
 - **Report:** `report/main.tex` (compiled PDF available via the Overleaf link below)
-- **Overleaf (editable):** _[add your Overleaf share link here]_
+- **Overleaf (editable):** https://www.overleaf.com/6227768115tdhffptcvrfw#23e7c6thsi
 - **Video presentation:** _[add your video link here]_
 
 ## Author
