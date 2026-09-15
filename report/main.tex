@@ -1,0 +1,629 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Enhancing Smart City Surveillance through Digital Image Processing: Filtering, Restoration, Segmentation, and Compression Techniques}
+
+\author{\IEEEauthorblockN{Zaid Khalid}
+\IEEEauthorblockA{\textit{Department of Computer Science} \\
+\textit{University of Management and Technology}\\
+Lahore, Pakistan \\
+f2023266005@umt.edu.pk}
+}
+
+\maketitle
+
+\begin{abstract}
+Smart city surveillance systems must balance real-time responsiveness against processing quality, and image fidelity against storage/bandwidth constraints, while operating on resource-limited edge hardware. This work implements and empirically evaluates a complete digital image processing pipeline addressing these trade-offs for a simulated Islamabad-style public-space surveillance scenario. Using a Custom Face Mask Dataset (14{,}536 images across three classes), we evaluate spatial-domain filtering (Mean, Median, Laplacian), frequency-domain filtering (Ideal, Butterworth, Gaussian) and restoration (Inverse, Wiener), edge- and region-based segmentation (Sobel, Canny, Region Growing, Watershed), JPEG and Wavelet compression, and a fine-tuned YOLOv8 classifier for mask-state recognition. Results show median filtering improves PSNR by 15.8~dB over unfiltered salt-and-pepper noise, Wiener restoration recovers 13.2~dB over naive inverse filtering, Wavelet compression achieves higher SSIM than JPEG at comparable compression ratios, and the recognition model reaches 95\% precision, recall, and F1-score at 246.9 FPS. Segmentation evaluation showed that mask-representation alignment substantially affects reported quality: correcting a thin-edge-versus-filled-region mismatch raised Canny's IoU from 0.080 to 0.384, while Watershed's persistently low overlap (0.003 IoU) reflects genuine under-segmentation. These findings quantify the real-world trade-offs a smart-city operator must navigate when deploying such a pipeline.
+\end{abstract}
+
+\begin{IEEEkeywords}
+digital image processing, smart surveillance, image filtering, image restoration, image segmentation, image compression, object recognition
+\end{IEEEkeywords}
+
+\section{Introduction}
+Smart city surveillance systems increasingly rely on networks of CCTV cameras to monitor public spaces for safety and traffic management. Municipal deployments of this kind serve multiple simultaneous purposes, including traffic-flow monitoring, incident detection, and public-safety enforcement, each of which places different demands on the underlying image-processing pipeline. However, real-world deployments such as Islamabad's public surveillance network face persistent challenges: variable lighting across time of day and season, sensor and transmission noise introduced by low-cost CCTV hardware and lossy network links, and the competing demands of real-time throughput versus processing accuracy required to act on footage promptly rather than merely archive it.
+
+These challenges are compounded by the fact that a deployed system cannot address noise, blur, and information density in isolation; a pipeline that removes noise but is too slow for real-time operation, or one that compresses footage so aggressively that downstream recognition fails, is not viable regardless of how well each stage performs in isolation. This motivates evaluating the full processing chain end-to-end rather than any single algorithm alone.
+
+This paper implements and evaluates a complete digital image processing pipeline addressing these challenges across six stages: spatial-domain filtering, frequency-domain filtering and restoration, image segmentation, image compression, and object recognition. Each stage is evaluated quantitatively using standard image quality and detection metrics, and the results are discussed in terms of the operational trade-offs, real-time performance, resource constraints, noise removal, image fidelity under compression, and privacy, that a real deployment would face. The remainder of this paper is organized as follows: Section II surveys related work; Section III formalizes the problem's conflicting requirements; Section IV describes the system architecture; Section V details the methodology for each pipeline stage; Sections VI and VII present the experimental setup and results; Section VIII discusses the findings in light of the brief's conflicting requirements; and Section IX concludes.
+
+\section{Related Work}
+Classical spatial and frequency-domain filtering techniques (mean, median, Gaussian, Butterworth) remain foundational for pre-processing noisy surveillance footage \cite{b1}. Median filtering in particular is well established as the preferred choice for impulse-type noise due to its edge-preserving, outlier-resistant statistics, whereas mean and Gaussian filters remain preferable for additive Gaussian noise \cite{b6}. Restoration techniques such as inverse and Wiener filtering address blur introduced by camera motion or defocus, with Wiener filtering's noise-power regularization long established as superior to naive inversion in low-SNR conditions \cite{b1}; more recent deep-learning-based deblurring approaches (e.g., DeblurGAN) offer further gains at higher computational cost, which is a relevant consideration for edge-deployed surveillance hardware \cite{b7}.
+
+Semantic segmentation datasets such as Cityscapes \cite{b2} and KITTI \cite{b3} provide pixel-level ground truth for urban scene understanding, though their use typically requires direct registration with the dataset providers rather than open redistribution. Classical segmentation methods, including Otsu thresholding, watershed transform, and region-growing, remain competitive baselines for constrained-hardware deployments where deep segmentation networks (e.g., U-Net, DeepLab) may exceed available compute \cite{b8}.
+
+Modern object detection and classification frameworks such as YOLO enable real-time recognition suitable for edge deployment \cite{b5}, motivating their use in the recognition stage of this work. Face-mask detection specifically has been studied extensively following the COVID-19 pandemic, with CNN- and YOLO-based approaches reporting accuracy in the 90--98\% range on datasets structurally similar to the one used here \cite{b9}. Finally, image compression for bandwidth-constrained surveillance transmission has been studied both via classical transform coding (JPEG, wavelet-based JPEG2000) \cite{b10} and learned neural compression, the latter offering improved rate-distortion performance at the cost of significant training and inference overhead unsuitable for low-power edge nodes \cite{b11}.
+
+\section{Problem Formulation}
+Smart city surveillance systems must reconcile several competing constraints. Real-time performance requires lightweight processing, yet higher processing quality (denoising, restoration) demands more computation, creating a direct tension between speed and accuracy. Resource-constrained edge devices limit the complexity of algorithms that can run on-site, forcing trade-offs against detection performance. Noise removal techniques risk erasing fine details needed for accurate identification, while compression for storage and bandwidth efficiency similarly risks degrading image fidelity. Finally, broader system accessibility can conflict with the security and privacy requirements inherent to surveillance of public spaces. This work investigates these trade-offs empirically across the core stages of a surveillance image-processing pipeline.
+
+\section{System Architecture}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{pipeline_architecture.png}
+\caption{Six-stage smart city surveillance image-processing pipeline architecture.}
+\label{fig:architecture}
+\end{figure}
+
+Fig.~\ref{fig:architecture} illustrates the six-stage pipeline architecture. Input imagery flows sequentially through spatial and frequency-domain filtering (noise suppression), restoration (blur recovery), segmentation (region/object isolation), compression (storage/bandwidth reduction), and object recognition (mask-state classification). Each stage is independently evaluated (Section VI) but is designed to compose into an end-to-end deployment pipeline: a real surveillance feed would pass through denoising and restoration before segmentation isolates candidate objects, compression prepares frames for transmission or archival, and recognition performs the final classification decision. Table~\ref{tab:interdep} summarizes each stage's primary output artifact and its role as input to downstream stages, making explicit the error-propagation risk inherent in a multi-stage pipeline: degraded output at an early stage (e.g., insufficient denoising) can compound through segmentation and recognition accuracy.
+
+\begin{table}[h]
+\caption{Pipeline Stage Interdependence}
+\label{tab:interdep}
+\centering
+\begin{tabular}{p{1.6cm}p{2.5cm}p{3.3cm}}
+\toprule
+Stage & Output Artifact & Consumed By \\
+\midrule
+Spatial/Freq.\ Filtering & Denoised image & Restoration, Segmentation \\
+Restoration & Deblurred image & Segmentation, Recognition \\
+Segmentation & Region/edge mask & Recognition (candidate regions) \\
+Compression & Compressed bitstream & Storage / transmission layer \\
+Recognition & Class label + confidence & Alerting / downstream decision \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Methodology}
+All experiments use the Custom Face Mask Dataset \cite{b4} (14{,}536 images across \texttt{with\_mask}, \texttt{without\_mask}, and \texttt{incorrect\_mask} classes), sampled to 300 images per class (900 total) for computational tractability and resized to $256\times256$ pixels. Synthetic degradations (Gaussian noise, salt-and-pepper noise, motion blur) were applied to generate controlled before/after test pairs. Table~\ref{tab:dataset} summarizes the full dataset composition prior to sampling and the synthetic degradation parameters applied.
+
+\begin{table}[h]
+\caption{Dataset Composition and Degradation Parameters}
+\label{tab:dataset}
+\centering
+\begin{tabular}{ll}
+\toprule
+Property & Value \\
+\midrule
+Total images (full dataset) & 14,536 \\
+With Mask (full / sampled) & 4,789 / 300 \\
+Without Mask (full / sampled) & 4,747 / 300 \\
+Incorrect Mask (full / sampled) & 5,000 / 300 \\
+Image resolution (resized) & $256\times256$ px \\
+Gaussian noise & $\sigma = 25$ \\
+Salt-and-pepper noise & 2\% pixel density \\
+Motion blur kernel & $15\times15$, horizontal \\
+Train/validation split (recognition) & 720 / 180 (80/20) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Computational Complexity Overview}
+Table~\ref{tab:complexity} summarizes the asymptotic time complexity of the core algorithm in each pipeline stage, where $N = H \times W$ denotes the number of pixels in an image and $k$ denotes a filter kernel dimension. Spatial filtering and segmentation operations scale with kernel size and pixel count; frequency-domain operations benefit from the FFT's $O(N \log N)$ complexity rather than the $O(N^2)$ of a naive Fourier transform; and the YOLOv8n recognition stage has a fixed per-image inference cost dominated by its (constant, pretrained-architecture) number of layers rather than input-dependent asymptotic scaling. This theoretical complexity ordering is consistent with the empirical FPS benchmark in Table~\ref{tab:fps}, where compression and edge detection (low per-pixel cost) achieve orders of magnitude higher throughput than median filtering and YOLO inference (higher per-pixel or per-image cost).
+
+\begin{table}[h]
+\caption{Computational Complexity by Pipeline Stage}
+\label{tab:complexity}
+\centering
+\begin{tabular}{lc}
+\toprule
+Stage & Time Complexity \\
+\midrule
+Mean/Median Filter (naive) & $O(N k^2 \log k^2)$ \\
+Mean/Median Filter (vectorized) & $O(N k^2)$ \\
+2D FFT & $O(N \log N)$ \\
+Frequency-Domain Filtering & $O(N \log N)$ \\
+Canny Edge Detection & $O(N)$ \\
+Region Growing & $O(N)$ \\
+Watershed & $O(N \log N)$ \\
+JPEG (DCT-based) Compression & $O(N)$ \\
+Wavelet Compression & $O(N)$ \\
+YOLOv8n Inference & $O(1)$ per image (fixed architecture) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Spatial Filtering}
+Mean, Median, and Laplacian filters were implemented from first principles (manual kernel convolution) to demonstrate the underlying mathematics, then re-implemented using vectorized SciPy operations for large-scale evaluation. Both implementations were verified to produce numerically consistent results; the vectorized version was approximately 100$\times$ faster (0.084~s vs.\ 6.12~s per image) and was used for the full dataset evaluation.
+
+\subsection{Frequency Domain Filtering}
+The 2D Fast Fourier Transform (FFT) was computed for each test image, and Ideal, Butterworth, and Gaussian filters were implemented in the frequency domain for both low-pass (smoothing) and high-pass (edge enhancement) variants, with a cutoff frequency of 30 pixels from the spectrum center.
+
+\subsection{Restoration}
+Motion blur was simulated using a $15\times15$ horizontal averaging kernel. Two restoration techniques were implemented: naive Inverse Filtering (direct frequency-domain deconvolution with a small stabilizing epsilon) and Wiener Filtering (deconvolution regularized by a noise-to-signal power ratio $K=0.01$).
+
+\subsubsection{Per-Class Restoration Quality}
+Table~\ref{tab:restorationperclass} reports Wiener restoration performance by class, showing the same ordering observed in spatial filtering: \texttt{without\_mask} restores best (23.57~dB, 0.766 SSIM), followed by \texttt{with\_mask} (21.36~dB) and \texttt{incorrect\_mask} (21.09~dB). This consistency across both filtering and restoration stages reinforces that image content complexity, rather than the specific algorithm applied, is the dominant factor governing achievable reconstruction fidelity for a given class.
+
+\begin{table}[h]
+\caption{Wiener Restoration Per-Class Performance}
+\label{tab:restorationperclass}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Class & PSNR & SSIM \\
+\midrule
+Incorrect Mask & 21.09 & 0.594 \\
+With Mask & 21.36 & 0.620 \\
+Without Mask & 23.57 & 0.766 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Segmentation}
+Edge-based segmentation was implemented using Sobel gradient magnitude, Canny edge detection, and Laplacian-of-Gaussian. Region-based segmentation was implemented using a from-scratch Region Growing algorithm (seeded at the image center, intensity threshold of 15) and OpenCV's marker-based Watershed algorithm. Because Cityscapes and KITTI require direct registration outside the Kaggle API used for this pipeline, quantitative evaluation used an Otsu-threshold mask as a pseudo-ground-truth reference. To ensure a fair comparison against this filled-region reference, Canny's thin edge output was additionally converted to a filled mask via morphological closing and flood-fill prior to IoU/Dice computation; both the raw and filled variants are reported, and the comparison methodology is discussed further in Section~VII.
+
+\subsection{Compression}
+JPEG (DCT-based) compression was evaluated at quality levels $\{10,30,50,70,90\}$, and Wavelet compression (Haar wavelet, 2-level decomposition with coefficient thresholding) was evaluated at threshold percentiles $\{50,70,85,95,99\}$. Rate-distortion behavior was measured as PSNR and SSIM against compression ratio.
+
+\subsection{Object Recognition}
+A YOLOv8n classification model (pretrained, fine-tuned) was trained on an 80/20 train/validation split of the sampled dataset (720 train, 180 validation images) for up to 15 epochs with early stopping (patience 5), using a Tesla T4 GPU. Precision, Recall, and F1-score were computed on the validation set, and processing speed (FPS) was benchmarked across pipeline stages using 50 sample images.
+
+\section{Experimental Setup}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{sample_classes.png}
+\caption{Representative sampled images from each of the three dataset classes.}
+\label{fig:samples}
+\end{figure}
+
+Fig.~\ref{fig:samples} shows representative examples from each of the three dataset classes used throughout this evaluation. Experiments were run in Google Colab (Python 3.13, Ultralytics 8.4.152, OpenCV, NumPy, SciPy, scikit-image, PyWavelets). Noisy test conditions were synthetically generated: Gaussian noise ($\sigma=25$), salt-and-pepper noise (2\% density), and motion blur (15-pixel kernel), applied to all 900 sampled clean images. Quantitative evaluation used PSNR and SSIM for filtering, restoration, and compression stages; IoU and Dice coefficient for segmentation; and Precision, Recall, F1-score, and FPS for recognition.
+
+\subsection{Reproducibility}
+All random sampling (dataset subset selection, noise generation seeds, train/validation splitting) used a fixed random seed (\texttt{seed=42}) to ensure results are reproducible across runs. Complete implementation code, organized as one Jupyter notebook per pipeline stage, is publicly available in the accompanying GitHub repository, along with the exact package versions used (Ultralytics 8.4.152, OpenCV, NumPy, SciPy, scikit-image, PyWavelets) to allow independent verification of the reported results.
+
+\section{Results}
+
+\subsection{Spatial Filtering}
+Table~\ref{tab:spatial} summarizes average PSNR/SSIM across all three classes for each noise type before and after filtering. Median filtering shows a substantial improvement over unfiltered salt-and-pepper noise (17.68~dB $\rightarrow$ 33.50~dB PSNR, +15.8~dB), while mean filtering shows only a modest gain on the same noise type (17.68~dB $\rightarrow$ 25.24~dB). For Gaussian noise, mean filtering slightly outperforms median filtering (28.13 vs.\ 27.79~dB), consistent with mean filtering's theoretical suitability for additive Gaussian noise. For motion blur, neither spatial filter meaningfully improves PSNR, as expected since blur is not an impulse/additive-noise phenomenon that spatial denoising filters are designed to address.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{filter_comparison_example.png}
+\caption{Spatial filtering comparison on salt-and-pepper noise: noisy input, mean filter, median filter, and Laplacian output.}
+\label{fig:spatial}
+\end{figure}
+
+\begin{table}[h]
+\caption{Spatial Filtering: Average PSNR (dB) / SSIM by Noise Type}
+\label{tab:spatial}
+\centering
+\begin{tabular}{llcc}
+\toprule
+Noise Type & Filter & PSNR & SSIM \\
+\midrule
+\multirow{3}{*}{Blur} & None & 26.68 & 0.762 \\
+ & Mean & 26.49 & 0.752 \\
+ & Median & 26.62 & 0.756 \\
+\midrule
+\multirow{3}{*}{Gaussian} & None & 23.50 & 0.457 \\
+ & Mean & 28.13 & 0.719 \\
+ & Median & 27.79 & 0.677 \\
+\midrule
+\multirow{3}{*}{Salt \& Pepper} & None & 17.68 & 0.339 \\
+ & Mean & 25.24 & 0.580 \\
+ & Median & 33.50 & 0.907 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Kernel Size Sensitivity}
+Table~\ref{tab:kernel} reports median filter performance on salt-and-pepper noise across kernel sizes $3\times3$, $5\times5$, and $7\times7$ (Fig.~\ref{fig:kernelsens}). PSNR and SSIM both decrease monotonically as kernel size increases (33.43~dB/0.909 at $3\times3$ down to 30.25~dB/0.835 at $7\times7$), despite larger kernels providing a wider neighborhood from which to estimate the true pixel value. This demonstrates the ``Noise Removal vs.\ Detail Preservation'' trade-off directly at the hyperparameter level: while a larger kernel more thoroughly removes sparse impulse noise, it simultaneously over-smooths fine edge detail (mask boundaries, facial features) not present in the noise itself, so image fidelity relative to the clean reference declines even as raw noise suppression improves. For this dataset, a $3\times3$ kernel is the preferable operating point, balancing denoising against detail retention.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\columnwidth]{kernel_sensitivity.png}
+\caption{Median filter kernel size vs. PSNR on salt-and-pepper noise.}
+\label{fig:kernelsens}
+\end{figure}
+
+\begin{table}[h]
+\caption{Median Filter Kernel Size Sensitivity (Salt \& Pepper Noise)}
+\label{tab:kernel}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Kernel Size & PSNR & SSIM \\
+\midrule
+$3\times3$ & 33.43 & 0.909 \\
+$5\times5$ & 31.89 & 0.873 \\
+$7\times7$ & 30.25 & 0.835 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Per-Class Filtering Quality}
+Table~\ref{tab:spatialperclass} breaks down median filtering performance (salt-and-pepper noise) by class. The \texttt{without\_mask} class denoises most effectively (33.17~dB, 0.845 SSIM), followed by \texttt{with\_mask} (28.69~dB) and \texttt{incorrect\_mask} (26.09~dB). This ordering directly reflects image content complexity: \texttt{without\_mask} images present a comparatively plain facial region with fewer high-frequency structures for the median filter to inadvertently blur, whereas \texttt{incorrect\_mask} images contain more fine detail (mask straps, partial occlusion boundaries) that a median filter partially smooths along with the noise, reducing reconstruction fidelity relative to the clean reference.
+
+\begin{table}[h]
+\caption{Median Filtering Per-Class Performance (Salt \& Pepper)}
+\label{tab:spatialperclass}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Class & PSNR & SSIM \\
+\midrule
+Incorrect Mask & 26.09 & 0.723 \\
+With Mask & 28.69 & 0.766 \\
+Without Mask & 33.17 & 0.845 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Frequency Domain Filtering and Restoration}
+Table~\ref{tab:restoration} summarizes restoration results averaged over 90 sampled images. Naive inverse filtering catastrophically fails (PSNR drops from 26.27~dB blurred to 8.78~dB restored), confirming its known instability at frequencies where the blur kernel's transform approaches zero. Wiener filtering substantially outperforms inverse filtering (22.01~dB vs.\ 8.78~dB PSNR; 0.660 vs.\ 0.137 SSIM), though it does not fully recover to the pre-blur PSNR, reflecting the fundamental information loss inherent in the blurring process.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{restoration_comparison.png}
+\caption{Restoration comparison: original, motion-blurred, inverse-filter restored, and Wiener-filter restored images.}
+\label{fig:restoration}
+\end{figure}
+
+\begin{table}[h]
+\caption{Restoration: Average PSNR / SSIM by Stage}
+\label{tab:restoration}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Stage & PSNR & SSIM \\
+\midrule
+Blurred (degraded) & 26.27 & 0.759 \\
+Inverse Filter Restoration & 8.78 & 0.137 \\
+Wiener Filter Restoration & 22.01 & 0.660 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Frequency Domain Filter Comparison}
+Fig.~\ref{fig:fftspectrum} shows the 2D FFT magnitude spectrum of a representative test image, with low-frequency content concentrated near the spectrum center and high-frequency detail (edges, texture) distributed toward the periphery. Fig.~\ref{fig:freqfilters} compares Ideal, Butterworth, and Gaussian filters in both low-pass and high-pass configurations at a cutoff of 30 pixels. Qualitatively, the Ideal filter's sharp frequency-domain cutoff introduces visible ringing artifacts (Gibbs phenomenon) in the spatial domain, most apparent around high-contrast edges in the low-pass output. The Butterworth and Gaussian filters, by contrast, apply a smoother transition band and consequently avoid this ringing, at the cost of a less sharply defined cutoff frequency. This is a direct instance of the ``Noise Removal vs.\ Detail Preservation'' trade-off in the frequency domain: aggressive, sharply bounded filtering (Ideal) preserves more of the intended passband exactly but introduces new artifacts, while gradual filtering (Gaussian) avoids artifacts but blends slightly more of the stopband into the result. For a surveillance pipeline prioritizing artifact-free output over exact frequency-domain precision, Gaussian or Butterworth filtering is the preferable choice.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\columnwidth]{fft_magnitude_spectrum.png}
+\caption{2D FFT magnitude spectrum of a representative test image.}
+\label{fig:fftspectrum}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{frequency_filters_comparison.png}
+\caption{Comparison of Ideal, Butterworth, and Gaussian filters, low-pass and high-pass, at cutoff frequency 30.}
+\label{fig:freqfilters}
+\end{figure}
+
+\subsubsection{Wiener Regularization Parameter Sensitivity}
+Table~\ref{tab:wienerk} sweeps the Wiener filter's regularization parameter $K$ across four orders of magnitude (Fig.~\ref{fig:wienerk}). PSNR peaks at $K=0.01$ (22.10~dB), with $K=0.1$ close behind (21.73~dB); at $K=0.001$, insufficient regularization allows noise amplification similar in character to naive inverse filtering, reducing PSNR to 19.22~dB, while at $K=1.0$, excessive regularization over-suppresses the deconvolution and collapses PSNR to 11.22~dB, worse than the unrestored blurred image. This confirms $K=0.01$, the value used throughout Section VI-B, as a near-optimal operating point rather than an arbitrary default, and illustrates that Wiener filtering's benefit over naive inversion is itself sensitive to correct hyperparameter selection rather than an unconditional improvement.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\columnwidth]{wiener_k_sensitivity.png}
+\caption{Wiener filter regularization parameter $K$ vs. restoration PSNR.}
+\label{fig:wienerk}
+\end{figure}
+
+\begin{table}[h]
+\caption{Wiener Filter $K$ Sensitivity}
+\label{tab:wienerk}
+\centering
+\begin{tabular}{lcc}
+\toprule
+$K$ & PSNR & SSIM \\
+\midrule
+0.001 & 19.22 & 0.521 \\
+0.01 & 22.10 & 0.664 \\
+0.1 & 21.73 & 0.716 \\
+1.0 & 11.22 & 0.528 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Per-Class Restoration Quality}
+Table~\ref{tab:restorationperclass} reports Wiener restoration performance by class, showing the same ordering observed in spatial filtering: \texttt{without\_mask} restores best (23.57~dB, 0.766 SSIM), followed by \texttt{with\_mask} (21.36~dB) and \texttt{incorrect\_mask} (21.09~dB). This consistency across both filtering and restoration stages reinforces that image content complexity, rather than the specific algorithm applied, is the dominant factor governing achievable reconstruction fidelity for a given class.
+
+\begin{table}[h]
+\caption{Wiener Restoration Per-Class Performance}
+\label{tab:restorationperclass}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Class & PSNR & SSIM \\
+\midrule
+Incorrect Mask & 21.09 & 0.594 \\
+With Mask & 21.36 & 0.620 \\
+Without Mask & 23.57 & 0.766 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Segmentation}
+Table~\ref{tab:segmentation} reports IoU and Dice coefficient for Canny and Watershed segmentation against the Otsu pseudo-ground-truth, comparing both a raw edge-based Canny output and a morphologically filled variant (closing followed by flood-fill, converting the thin edge map into a comparable filled region mask). The raw Canny output scores near-zero (0.080 IoU), while the filled variant scores substantially higher (0.384 IoU, 0.518 Dice), a 4.8$\times$ improvement, confirming that the original low score was primarily a mask-representation artifact rather than a genuine segmentation failure (Fig.~\ref{fig:segfilled}). Watershed remains low even after this correction (0.003 IoU), indicating it under-segments the target region relative to the Otsu reference on this dataset, a genuine finding rather than a masking artifact, as discussed in Section~VII.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{edge_segmentation_comparison.png}
+\caption{Edge-based segmentation: Sobel, Canny, and Laplacian-of-Gaussian outputs.}
+\label{fig:segmentation}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{region_segmentation_comparison.png}
+\caption{Region-based segmentation: Region Growing and Watershed outputs.}
+\label{fig:segmentation2}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{segmentation_filled_comparison.png}
+\caption{Effect of mask-shape correction: raw Canny edges, morphologically filled Canny mask, and the Otsu pseudo-ground-truth used for comparison.}
+\label{fig:segfilled}
+\end{figure}
+
+\begin{table}[h]
+\caption{Segmentation: Average IoU / Dice by Method}
+\label{tab:segmentation}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Method & IoU & Dice \\
+\midrule
+Canny (raw edges) & 0.080 & 0.144 \\
+Canny (filled) & 0.384 & 0.518 \\
+Watershed & 0.003 & 0.006 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Per-Class Segmentation Quality}
+Table~\ref{tab:segperclass} reports filled-Canny segmentation performance by class, revealing a pattern that is the inverse of the filtering and restoration results above: \texttt{incorrect\_mask} achieves the highest IoU (0.478) despite having the lowest filtering/restoration fidelity, while \texttt{without\_mask} achieves the lowest IoU (0.260) despite having the highest filtering/restoration fidelity. This inversion is explained by what each task actually rewards: filtering and restoration fidelity (PSNR/SSIM) reward images with less fine-grained texture to lose, whereas edge-based segmentation overlap (IoU) rewards images with more distinct, high-contrast boundaries for both Canny and the Otsu reference to agree on. \texttt{Incorrect\_mask} images' visible mask straps and partial occlusion edges provide exactly this kind of strong, mutually detectable boundary structure, whereas \texttt{without\_mask} images' relatively uniform facial region gives Canny and Otsu fewer strong edges to agree on, despite being easier to denoise. This finding illustrates that no single pipeline configuration is uniformly optimal across all tasks and classes, reinforcing the need for stage-specific, and potentially class-aware, parameter tuning in a real deployment.
+
+\begin{table}[h]
+\caption{Filled-Canny Segmentation Per-Class Performance}
+\label{tab:segperclass}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Class & IoU & Dice \\
+\midrule
+Incorrect Mask & 0.478 & 0.635 \\
+With Mask & 0.414 & 0.561 \\
+Without Mask & 0.260 & 0.357 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Compression}
+Table~\ref{tab:compression} summarizes rate-distortion results averaged over 60 sampled images per method. Wavelet compression at a moderate threshold (70th percentile) achieves both a higher compression ratio and higher fidelity than JPEG at quality 70 (3.32$\times$ ratio, 42.81~dB PSNR, 0.976 SSIM vs.\ 2.57$\times$ ratio, 36.31~dB PSNR, 0.943 SSIM), though at more aggressive settings (Wavelet threshold 90, JPEG quality 30) the two methods converge to comparable fidelity at different compression ratios, illustrating the rate-distortion trade-off central to the brief's compression requirement.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{rate_distortion_curves.png}
+\caption{Rate-distortion curves comparing JPEG and Wavelet compression: PSNR and SSIM versus compression ratio.}
+\label{fig:ratedist}
+\end{figure}
+
+\begin{table}[h]
+\caption{Compression: Average Compression Ratio / PSNR / SSIM}
+\label{tab:compression}
+\centering
+\begin{tabular}{lccc}
+\toprule
+Method & Ratio & PSNR & SSIM \\
+\midrule
+JPEG (Q30) & 4.61 & 32.41 & 0.892 \\
+JPEG (Q70) & 2.57 & 36.31 & 0.943 \\
+JPEG (Q90) & 1.33 & 40.68 & 0.975 \\
+Wavelet (T70) & 3.32 & 42.81 & 0.976 \\
+Wavelet (T90) & 9.99 & 33.36 & 0.883 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Visual Quality Across Compression Settings}
+Fig.~\ref{fig:jpegsweep} and Fig.~\ref{fig:waveletsweep} show a representative image compressed at each tested quality level (JPEG) and threshold percentile (Wavelet). The JPEG sweep shows characteristic $8\times8$ block artifacts emerging at low quality (Q=10), visible as blocky discontinuities particularly around the mask boundary. The Wavelet sweep instead shows a more gradual, blur-like loss of high-frequency detail as the threshold percentile increases, without the blocking artifacts characteristic of DCT-based compression. This qualitative difference underlies the quantitative Wavelet advantage in SSIM reported in Table~\ref{tab:compression}: SSIM is sensitive to structural (edge and texture) degradation, which JPEG's blocking artifacts disrupt more severely than Wavelet's smoother degradation pattern at a matched compression ratio.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{jpeg_compression_comparison.png}
+\caption{JPEG compression at quality levels 10, 30, 50, 70, and 90.}
+\label{fig:jpegsweep}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{wavelet_compression_comparison.png}
+\caption{Wavelet compression at threshold percentiles 50, 70, 85, 95, and 99.}
+\label{fig:waveletsweep}
+\end{figure}
+
+\subsubsection{Per-Class Compression Behavior}
+Table~\ref{tab:perclasscomp} breaks down JPEG (quality 70) compression by class in terms of bits-per-pixel (bpp) and reconstruction PSNR. The \texttt{without\_mask} class compresses most efficiently (0.869~bpp, 40.98~dB PSNR), while \texttt{incorrect\_mask} requires the most bits (1.366~bpp) for the lowest resulting fidelity (33.23~dB). This is consistent with image content complexity: \texttt{without\_mask} images typically contain a plain, low-texture facial region, which the DCT-based JPEG encoder represents compactly, whereas \texttt{incorrect\_mask} images contain higher-frequency detail (mask edges, straps, partial occlusion boundaries) that require more bits to encode at a given quality setting. This finding has a direct operational implication: a fixed compression quality setting does not yield uniform bandwidth usage across a heterogeneous surveillance feed, and adaptive bitrate allocation by scene complexity may be preferable to a fixed quality parameter in deployment.
+
+\begin{table}[h]
+\caption{Per-Class Compression Behavior (JPEG, Quality 70)}
+\label{tab:perclasscomp}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Class & Bits/Pixel & PSNR \\
+\midrule
+With Mask & 1.263 & 34.72 \\
+Without Mask & 0.869 & 40.98 \\
+Incorrect Mask & 1.366 & 33.23 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Object Recognition and Processing Speed}
+The fine-tuned YOLOv8n classifier achieved 95.0\% precision, 95.0\% recall, and a 95.0\% F1-score on the 180-image validation set (Table~\ref{tab:recognition}), with the \texttt{without\_mask} class showing marginally lower recall (0.92) than the other two classes. Table~\ref{tab:fps} reports processing speed across pipeline stages. Lightweight operations (JPEG compression, Canny edge detection) exceed 1{,}000 FPS, comfortably supporting real-time throughput, while median filtering (38.2 FPS) and YOLO inference (246.9 FPS) represent the pipeline's throughput bottlenecks.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{fps_benchmark.png}
+\caption{Processing speed (FPS) benchmark across pipeline stages.}
+\label{fig:fps}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{yolo_training_curves.png}
+\caption{YOLOv8n classifier training curves: loss and accuracy over 15 epochs.}
+\label{fig:trainingcurves}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\columnwidth]{yolo_confusion_matrix.png}
+\caption{Confusion matrix for the fine-tuned YOLOv8n classifier on the validation set.}
+\label{fig:confmatrix}
+\end{figure}
+
+\begin{table}[h]
+\caption{Recognition: Validation Set Performance}
+\label{tab:recognition}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Class & Precision & Recall & F1 & Support \\
+\midrule
+Incorrect Mask & 0.95 & 0.97 & 0.96 & 60 \\
+With Mask & 0.95 & 0.97 & 0.96 & 60 \\
+Without Mask & 0.95 & 0.92 & 0.93 & 60 \\
+\midrule
+\textbf{Weighted Avg} & \textbf{0.95} & \textbf{0.95} & \textbf{0.95} & 180 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:literature} situates the fine-tuned model's 95.0\% F1-score against previously reported face-mask detection accuracy ranges from the literature \cite{b9}, confirming that this pipeline's recognition stage falls within the expected performance envelope for CNN/YOLO-based approaches on structurally similar datasets, despite using a comparatively lightweight nano-scale architecture (YOLOv8n) and a reduced 900-image training subset rather than the full 14,536-image dataset.
+
+\begin{table}[h]
+\caption{Recognition Performance vs.\ Literature Benchmarks}
+\label{tab:literature}
+\centering
+\begin{tabular}{lc}
+\toprule
+Source & Accuracy / F1 Range \\
+\midrule
+Loey et al.\ \cite{b9} (CNN/YOLO, various) & 90--98\% \\
+This work (YOLOv8n, 900-image subset) & 95.0\% F1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\caption{Processing Speed by Pipeline Stage}
+\label{tab:fps}
+\centering
+\begin{tabular}{lc}
+\toprule
+Stage & FPS \\
+\midrule
+Median Filtering & 38.2 \\
+Canny Edge Detection & 1142.2 \\
+JPEG Compression & 2773.8 \\
+YOLO Classification & 246.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+The results confirm several theoretically expected trade-offs. Median filtering's strong performance on salt-and-pepper noise versus mean filtering's comparative advantage on Gaussian noise (Section VI-A) directly illustrates the ``Noise Removal vs.\ Detail Preservation'' trade-off: the correct filter choice depends on the noise model, and misapplying mean filtering to impulse noise leaves visible artifacts.
+
+The restoration results (Section VI-B) demonstrate why naive inverse filtering is unsuitable for practical deployment: its 8.78~dB PSNR (worse than the unrestored blurred image) reflects noise amplification at frequencies near the blur kernel's transform zeros. Wiener filtering's regularization term $K$ trades off some restoration sharpness for stability, recovering substantially more of the original signal.
+
+The segmentation results (Section VI-C) illustrate the importance of mask-representation alignment in quantitative evaluation. Canny's raw thin edge output scored near-zero against the filled Otsu pseudo-ground-truth (0.080 IoU) purely because sparse boundary lines and filled regions occupy fundamentally different pixel areas, a methodological artifact rather than evidence of poor edge detection. Applying morphological closing and flood-fill to convert the edge map into a comparable filled mask corrected this: the filled Canny variant scored 0.384 IoU and 0.518 Dice, a result consistent with the qualitatively reasonable boundaries visible in Fig.~\ref{fig:segmentation}. This correction demonstrates that evaluation protocol design, specifically ensuring predicted and reference masks share a comparable representation, is as important to reported segmentation quality as the segmentation algorithm itself. Watershed's IoU remained low (0.003) even after applying the same Otsu reference, indicating genuine under-segmentation relative to the reference region on this dataset rather than a representation mismatch, since Watershed already produces filled regions. A still stronger evaluation would use genuine pixel-level ground truth from Cityscapes or KITTI (requiring separate dataset registration, outside this pipeline's scope), which is noted as a direction for future work.
+
+A cross-cutting observation emerges from comparing the per-class results across Sections VI-A, VI-B, and VI-C: the class ordering by filtering/restoration fidelity (\texttt{without\_mask} best, \texttt{incorrect\_mask} worst) is the exact inverse of the ordering by segmentation IoU (\texttt{incorrect\_mask} best, \texttt{without\_mask} worst). This indicates that a single, class-agnostic pipeline configuration cannot be simultaneously optimal for every downstream task; a deployment prioritizing noise removal for archival image quality would tune differently than one prioritizing segmentation for object localization. This reinforces the brief's ``Resource Constraints vs.\ Performance'' trade-off at a finer granularity than the FPS benchmark alone captures: the optimal configuration is task-dependent, not just hardware-dependent.
+
+The compression results (Section VI-D) show Wavelet compression's advantage in structural similarity at moderate compression ratios, consistent with its multi-resolution representation avoiding JPEG's blocking artifacts from 8$\times$8 DCT partitioning. This directly demonstrates the ``Compression vs.\ Image Fidelity'' trade-off: higher compression ratios in both methods reduce PSNR and SSIM, but the rate of degradation differs, informing which method suits which bandwidth/storage constraint.
+
+Finally, the FPS benchmark (Section VI-E) quantifies the ``Real-Time Performance vs.\ Processing Quality'' trade-off directly: simple thresholding-style operations (JPEG, Canny) support well beyond real-time throughput, while the more computationally demanding stages (median filtering, YOLO inference) impose the binding constraints on end-to-end pipeline throughput. In a resource-constrained edge deployment, this suggests prioritizing lightweight compression and edge detection at the sensor while reserving recognition inference for a centralized or GPU-equipped node, directly addressing the brief's ``Resource Constraints vs.\ Performance'' trade-off.
+
+The brief's fifth conflicting requirement, ``Security and Privacy vs.\ System Accessibility,'' was not directly measured quantitatively in this pipeline but merits explicit discussion. A deployed surveillance system built on this pipeline would need to balance broad accessibility (multiple operators, centralized dashboards, cloud-based storage of compressed footage) against the privacy expectations of individuals captured in public-space footage. Practical mitigations consistent with this pipeline's design include: performing recognition inference at the edge (avoiding transmission of raw, identifiable frames to centralized servers), applying face-blurring or selective redaction post-segmentation before any footage leaves the local node, and restricting full-resolution archival storage in favor of the compressed representations evaluated in Section VI-D, which additionally reduce the volume of sensitive data retained. Access to any retained footage should be governed by role-based authentication and audit logging, consistent with standard data-governance practice for public-space surveillance deployments.
+
+\subsection{Limitations and Future Work}
+Several limitations constrain the generalizability of these results. First, all experiments used a single dataset (Custom Face Mask Dataset) rather than the vehicle/pedestrian-focused Cityscapes or KITTI datasets referenced in the original problem brief; those datasets require separate manual registration outside the Kaggle API used throughout this pipeline, and their inclusion would allow direct evaluation of vehicle and pedestrian identification rather than the proxy mask-classification task used here. Second, the segmentation evaluation, even after the mask-representation correction in Section VII, still relies on an Otsu-threshold pseudo-ground-truth rather than human-annotated pixel labels, which likely underestimates true segmentation quality since Otsu thresholding is itself an imperfect reference. Third, the FPS benchmarks in Section VI-E were measured on Google Colab's shared cloud hardware rather than representative edge hardware (e.g., a Raspberry Pi or Jetson Nano), and absolute throughput numbers would differ, though the relative ordering of pipeline stages by computational cost is expected to hold. Future work should prioritize evaluation on genuine pixel-level segmentation datasets, benchmarking on representative low-power edge hardware, and an end-to-end integration test combining all six stages into a single real-time pipeline rather than evaluating each stage independently.
+
+\section{Conclusion}
+This work implemented and evaluated a complete six-stage digital image processing pipeline for smart city surveillance, covering spatial and frequency-domain filtering, restoration, segmentation, compression, and object recognition. Quantitative results confirm well-established theoretical expectations: median filtering for impulse noise, Wiener over inverse filtering for blur restoration, and Wavelet compression's structural-similarity advantage over JPEG at moderate compression ratios. The fine-tuned recognition model achieved 95\% precision, recall, and F1-score at real-time-capable throughput. The segmentation evaluation surfaced a genuine methodological limitation in comparing edge- and region-based outputs against a region-based pseudo-ground-truth, documented transparently here as a direction for future work using genuine pixel-level annotations. Collectively, these results quantify the operational trade-offs, real-time performance, resource constraints, noise removal, compression, and detail preservation, that a practical smart-city surveillance deployment must navigate.
+
+\begin{thebibliography}{00}
+\bibitem{b1} R. C. Gonzalez and R. E. Woods, \textit{Digital Image Processing}, 4th ed. New York: Pearson, 2018.
+\bibitem{b2} M. Cordts et al., ``The Cityscapes Dataset for Semantic Urban Scene Understanding,'' in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), 2016, pp. 3213-3223.
+\bibitem{b3} A. Geiger, P. Lenz, and R. Urtasun, ``Are we ready for Autonomous Driving? The KITTI Vision Benchmark Suite,'' in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), 2012, pp. 3354-3361.
+\bibitem{b4} S. Burhan, ``Face Mask Dataset,'' Kaggle, 2023. [Online]. Available: https://www.kaggle.com/datasets/shiekhburhan/face-mask-dataset
+\bibitem{b5} G. Jocher, A. Chaurasia, and J. Qiu, ``Ultralytics YOLOv8,'' 2023. [Online]. Available: https://github.com/ultralytics/ultralytics
+\bibitem{b6} R. C. Gonzalez, R. E. Woods, and S. L. Eddins, \textit{Digital Image Processing Using MATLAB}, 3rd ed. Knoxville, TN: Gatesmark Publishing, 2020.
+\bibitem{b7} O. Kupyn, V. Budzan, M. Mykhailych, D. Mishkin, and J. Matas, ``DeblurGAN: Blind Motion Deblurring Using Conditional Adversarial Networks,'' in Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR), 2018, pp. 8183-8192.
+\bibitem{b8} O. Ronneberger, P. Fischer, and T. Brox, ``U-Net: Convolutional Networks for Biomedical Image Segmentation,'' in Medical Image Computing and Computer-Assisted Intervention (MICCAI), 2015, pp. 234-241.
+\bibitem{b9} M. Loey, G. Manogaran, M. H. N. Taha, and N. E. M. Khalifa, ``A Hybrid Deep Transfer Learning Model with Machine Learning Methods for Face Mask Detection in the Era of the COVID-19 Pandemic,'' Measurement, vol. 167, 2021, Art. no. 108288.
+\bibitem{b10} D. S. Taubman and M. W. Marcellin, \textit{JPEG2000: Image Compression Fundamentals, Standards and Practice}. Boston, MA: Springer, 2002.
+\bibitem{b11} J. Balle, V. Laparra, and E. P. Simoncelli, ``End-to-end Optimized Image Compression,'' in Proc. Int. Conf. Learning Representations (ICLR), 2017.
+\end{thebibliography}
+
+\appendix
+\subsection{From-Scratch Filter Implementations}
+This appendix presents pseudocode for the manually implemented spatial-domain filters described in Section IV-A, demonstrating the underlying kernel mathematics independent of library calls.
+
+\begin{algorithmic}
+\STATE \textbf{Algorithm 1: Mean Filter (from scratch)}
+\STATE \textbf{Input:} Image $I$, kernel size $k$
+\STATE \textbf{Output:} Filtered image $O$
+\STATE $pad \gets \lfloor k/2 \rfloor$
+\STATE $I_{pad} \gets$ reflect-pad $I$ by $pad$ on all sides
+\FOR{each pixel $(i,j,c)$ in $I$}
+    \STATE $region \gets I_{pad}[i{:}i{+}k,\, j{:}j{+}k,\, c]$
+    \STATE $O[i,j,c] \gets \text{mean}(region)$
+\ENDFOR
+\STATE \textbf{return} clip($O$, 0, 255)
+\end{algorithmic}
+
+\begin{algorithmic}
+\STATE \textbf{Algorithm 2: Median Filter (from scratch)}
+\STATE \textbf{Input:} Image $I$, kernel size $k$
+\STATE \textbf{Output:} Filtered image $O$
+\STATE $pad \gets \lfloor k/2 \rfloor$
+\STATE $I_{pad} \gets$ reflect-pad $I$ by $pad$ on all sides
+\FOR{each pixel $(i,j,c)$ in $I$}
+    \STATE $region \gets I_{pad}[i{:}i{+}k,\, j{:}j{+}k,\, c]$
+    \STATE $O[i,j,c] \gets \text{median}(region)$
+\ENDFOR
+\STATE \textbf{return} clip($O$, 0, 255)
+\end{algorithmic}
+
+\begin{algorithmic}
+\STATE \textbf{Algorithm 3: Region Growing (from scratch)}
+\STATE \textbf{Input:} Grayscale image $I$, seed pixel $s$, threshold $t$
+\STATE \textbf{Output:} Binary region mask $M$
+\STATE $M \gets \mathbf{0}$, $visited \gets \mathbf{0}$, $stack \gets [s]$
+\STATE $\mu \gets I[s]$ \COMMENT{running region mean}
+\WHILE{$stack$ is not empty}
+    \STATE $(y,x) \gets stack.\text{pop}()$
+    \STATE $M[y,x] \gets 1$
+    \FOR{each 4-neighbor $(y',x')$ of $(y,x)$}
+        \IF{$(y',x')$ unvisited and $|I[y',x'] - \mu| \leq t$}
+            \STATE mark visited, push $(y',x')$ onto $stack$
+            \STATE update running mean $\mu$
+        \ENDIF
+    \ENDFOR
+\ENDWHILE
+\STATE \textbf{return} $M$
+\end{algorithmic}
+
+\subsection{Evaluation Metric Definitions}
+For reference, the quantitative metrics used throughout Section VI are defined as follows. Peak Signal-to-Noise Ratio:
+\begin{equation}
+\text{PSNR} = 10 \log_{10}\left(\frac{255^2}{\text{MSE}}\right)
+\end{equation}
+where MSE is the mean squared error between the reference and processed image. Structural Similarity Index (SSIM) is computed per the standard windowed formulation of Wang et al. Intersection-over-Union and Dice coefficient for binary masks $P$ (predicted) and $G$ (ground truth):
+\begin{equation}
+\text{IoU} = \frac{|P \cap G|}{|P \cup G|}, \qquad
+\text{Dice} = \frac{2|P \cap G|}{|P| + |G|}
+\end{equation}
+
+\end{document}
